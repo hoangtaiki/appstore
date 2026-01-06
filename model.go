@@ -69,6 +69,35 @@ type MassExtendRenewalDateRequest struct {
 	StorefrontCountryCodes []string `json:"storefrontCountryCodes"`
 }
 
+type DeliveryStatus string
+
+// DeliveryStatus https://developer.apple.com/documentation/appstoreserverapi/deliverystatus
+const (
+	DELIVERED                 DeliveryStatus = "DELIVERED"
+	UNDELIVERED_QUALITY_ISSUE DeliveryStatus = "UNDELIVERED_QUALITY_ISSUE"
+	UNDELIVERED_WRONG_ITEM    DeliveryStatus = "UNDELIVERED_WRONG_ITEM"
+	UNDELIVERED_SERVER_OUTAGE DeliveryStatus = "UNDELIVERED_SERVER_OUTAGE"
+	UNDELIVERED_OTHER         DeliveryStatus = "UNDELIVERED_OTHER"
+)
+
+type RefundPreference string
+
+// RefundPreference https://developer.apple.com/documentation/appstoreserverapi/refundpreference
+const (
+	DECLINE        RefundPreference = "DECLINE"
+	GRANT_FULL     RefundPreference = "GRANT_FULL"
+	GRANT_PRORATED RefundPreference = "GRANT_PRORATED"
+)
+
+// ConsumptionRequestBody https://developer.apple.com/documentation/appstoreserverapi/consumptionrequest
+type ConsumptionRequest struct {
+	CustomerConsented     bool             `json:"customerConsented"`
+	ConsumptionPercentage int32            `json:"consumptionPercentage"`
+	DeliveryStatus        DeliveryStatus   `json:"deliveryStatus"`
+	RefundPreference      RefundPreference `json:"refundPreference"`
+	SampleContentProvided bool             `json:"sampleContentProvided"`
+}
+
 // ConsumptionRequestBody https://developer.apple.com/documentation/appstoreserverapi/consumptionrequest
 type ConsumptionRequestBody struct {
 	AccountTenure            int32  `json:"accountTenure"`
@@ -85,29 +114,67 @@ type ConsumptionRequestBody struct {
 	RefundPreference         int32  `json:"refundPreference"`
 }
 
+type AdvancedCommerceDescriptors struct {
+	Description string `json:"description"`
+	DisplayName string `json:"displayName"`
+}
+
+type AdvancedCommercePriceIncreaseInfo struct {
+	DependentSKUs []string `json:"dependentSKUs"`
+	Price         int64    `json:"price"`
+	Status        string   `json:"status"`
+}
+
+type AdvancedCommerceOffer struct {
+	Period      string `json:"period"`
+	PeriodCount int32  `json:"periodCount"`
+	Price       int64  `json:"price"`
+	Reason      string `json:"reason"`
+}
+
+type AdvancedCommerceRenewalItems struct {
+	SKU               string                            `json:"SKU"`
+	Description       string                            `json:"description"`
+	DisplayName       string                            `json:"displayName"`
+	Offer             AdvancedCommerceOffer             `json:"offer"`
+	Price             int64                             `json:"price"`
+	PriceIncreaseInfo AdvancedCommercePriceIncreaseInfo `json:"priceIncreaseInfo"`
+}
+
+// AdvancedCommerceRenewalInfo https://developer.apple.com/documentation/appstoreserverapi/advancedcommercerenewalinfo
+type AdvancedCommerceRenewalInfo struct {
+	ConsistencyToken   string                         `json:"consistencyToken"`
+	Descriptors        AdvancedCommerceDescriptors    `json:"descriptors"`
+	Items              []AdvancedCommerceRenewalItems `json:"items"`
+	Period             string                         `json:"period"`
+	RequestReferenceId string                         `json:"requestReferenceId"`
+	TaxCode            string                         `json:"taxCode"`
+}
+
 // JWSRenewalInfoDecodedPayload https://developer.apple.com/documentation/appstoreserverapi/jwsrenewalinfodecodedpayload
 type JWSRenewalInfoDecodedPayload struct {
-	AppAccountToken             string            `json:"appAccountToken,omitempty"`
-	AppTransactionId            string            `json:"appTransactionId,omitempty"`
-	AutoRenewProductId          string            `json:"autoRenewProductId"`
-	AutoRenewStatus             int32             `json:"autoRenewStatus"`
-	Environment                 Environment       `json:"environment"`
-	ExpirationIntent            int32             `json:"expirationIntent"`
-	GracePeriodExpiresDate      int64             `json:"gracePeriodExpiresDate"`
-	IsInBillingRetryPeriod      *bool             `json:"isInBillingRetryPeriod"`
-	OfferIdentifier             string            `json:"offerIdentifier"`
-	OfferType                   int32             `json:"offerType"`
-	OfferPeriod                 string            `json:"offerPeriod"`
-	OriginalTransactionId       string            `json:"originalTransactionId"`
-	PriceIncreaseStatus         *int32            `json:"priceIncreaseStatus"`
-	ProductId                   string            `json:"productId"`
-	RecentSubscriptionStartDate int64             `json:"recentSubscriptionStartDate"`
-	RenewalDate                 int64             `json:"renewalDate"`
-	SignedDate                  int64             `json:"signedDate"`
-	RenewalPrice                int64             `json:"renewalPrice,omitempty"`
-	Currency                    string            `json:"currency,omitempty"`
-	OfferDiscountType           OfferDiscountType `json:"offerDiscountType,omitempty"`
-	EligibleWinBackOfferIds     []string          `json:"eligibleWinBackOfferIds,omitempty"`
+	AppAccountToken             string                      `json:"appAccountToken,omitempty"`
+	AppTransactionId            string                      `json:"appTransactionId,omitempty"`
+	AutoRenewProductId          string                      `json:"autoRenewProductId"`
+	AutoRenewStatus             int32                       `json:"autoRenewStatus"`
+	Environment                 Environment                 `json:"environment"`
+	ExpirationIntent            int32                       `json:"expirationIntent"`
+	GracePeriodExpiresDate      int64                       `json:"gracePeriodExpiresDate"`
+	IsInBillingRetryPeriod      *bool                       `json:"isInBillingRetryPeriod"`
+	OfferIdentifier             string                      `json:"offerIdentifier"`
+	OfferType                   int32                       `json:"offerType"`
+	OfferPeriod                 string                      `json:"offerPeriod"`
+	OriginalTransactionId       string                      `json:"originalTransactionId"`
+	PriceIncreaseStatus         *int32                      `json:"priceIncreaseStatus"`
+	ProductId                   string                      `json:"productId"`
+	RecentSubscriptionStartDate int64                       `json:"recentSubscriptionStartDate"`
+	RenewalDate                 int64                       `json:"renewalDate"`
+	SignedDate                  int64                       `json:"signedDate"`
+	RenewalPrice                int64                       `json:"renewalPrice,omitempty"`
+	Currency                    string                      `json:"currency,omitempty"`
+	OfferDiscountType           OfferDiscountType           `json:"offerDiscountType,omitempty"`
+	EligibleWinBackOfferIds     []string                    `json:"eligibleWinBackOfferIds,omitempty"`
+	AdvancedCommerceInfo        AdvancedCommerceRenewalInfo `json:"advancedCommerceInfo,omitempty"`
 }
 
 func (J JWSRenewalInfoDecodedPayload) Valid() error {
@@ -172,6 +239,14 @@ const (
 	OfferDiscountTypePayUpFront OfferDiscountType = "PAY_UP_FRONT"
 )
 
+type RevocationType string
+
+const (
+	REFUND_FULL     RevocationType = "REFUND_FULL"
+	REFUND_PRORATED RevocationType = "REFUND_PRORATED"
+	FAMILY_REVOKE   RevocationType = "FAMILY_REVOKE"
+)
+
 // JWSTransaction https://developer.apple.com/documentation/appstoreserverapi/jwstransaction
 type JWSTransaction struct {
 	AppTransactionId            string            `json:"appTransactionId,omitempty"`
@@ -194,6 +269,8 @@ type JWSTransaction struct {
 	OfferIdentifier             string            `json:"offerIdentifier,omitempty"`
 	RevocationDate              int64             `json:"revocationDate,omitempty"`
 	RevocationReason            *int32            `json:"revocationReason,omitempty"`
+	RevocationType              RevocationType    `json:"revocationType,omitempty"`
+	RevocationPercentage        int32             `json:"revocationPercentage,omitempty"`
 	IsUpgraded                  bool              `json:"isUpgraded,omitempty"`
 	Storefront                  string            `json:"storefront,omitempty"`
 	StorefrontId                string            `json:"storefrontId,omitempty"`

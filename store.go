@@ -25,6 +25,7 @@ const (
 	PathTransactionHistory                  = "/inApps/v2/history/{originalTransactionId}"
 	PathRefundHistory                       = "/inApps/v2/refund/lookup/{originalTransactionId}"
 	PathGetALLSubscriptionStatus            = "/inApps/v1/subscriptions/{originalTransactionId}"
+	PathConsumptionInfoV2                   = "/inApps/v2/transactions/consumption/{transactionId}"
 	PathConsumptionInfo                     = "/inApps/v1/transactions/consumption/{originalTransactionId}"
 	PathExtendSubscriptionRenewalDate       = "/inApps/v1/subscriptions/extend/{originalTransactionId}"
 	PathExtendSubscriptionRenewalDateForAll = "/inApps/v1/subscriptions/extend/mass/"
@@ -276,6 +277,24 @@ func (c *StoreClient) GetRefundHistory(ctx context.Context, originalTransactionI
 
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// SendConsumptionInfoV2 https://developer.apple.com/documentation/appstoreserverapi/send-consumption-information
+func (c *StoreClient) SendConsumptionInfoV2(ctx context.Context, transactionId string, body ConsumptionRequest) (statusCode int, err error) {
+	URL := c.hostUrl + PathConsumptionInfoV2
+	URL = strings.Replace(URL, "{transactionId}", transactionId, -1)
+
+	bodyBuf := new(bytes.Buffer)
+	err = json.NewEncoder(bodyBuf).Encode(body)
+	if err != nil {
+		return 0, err
+	}
+
+	statusCode, _, err = c.Do(ctx, http.MethodPut, URL, bodyBuf)
+	if err != nil {
+		return statusCode, err
+	}
+	return statusCode, nil
 }
 
 // SendConsumptionInfo https://developer.apple.com/documentation/appstoreserverapi/send_consumption_information
