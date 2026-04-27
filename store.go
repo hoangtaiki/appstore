@@ -35,6 +35,7 @@ const (
 	PathGetTestNotificationStatus           = "/inApps/v1/notifications/test/{testNotificationToken}"
 	PathSetAppAccountToken                  = "/inApps/v1/transactions/{originalTransactionId}/appAccountToken"
 	PathGetAppTransactionInfo               = "/inApps/v1/transactions/appTransactions/{transactionId}"
+	PathFinishTransaction                   = "/inApps/v1/transactions/{transactionId}/finish"
 )
 
 type StoreConfig struct {
@@ -453,6 +454,14 @@ func (c *StoreClient) SetAppAccountToken(ctx context.Context, originalTransactio
 		return statusCode, err
 	}
 	return statusCode, nil
+}
+
+// FinishTransaction https://developer.apple.com/documentation/appstoreserverapi/finish-transaction
+func (c *StoreClient) FinishTransaction(ctx context.Context, transactionId string) (statusCode int, err error) {
+	URL := c.hostUrl + PathFinishTransaction
+	URL = strings.Replace(URL, "{transactionId}", transactionId, -1)
+	statusCode, _, err = c.Do(ctx, http.MethodPost, URL, nil)
+	return
 }
 
 func (c *StoreClient) ParseNotificationV2(tokenStr string) (*jwt.Token, error) {
