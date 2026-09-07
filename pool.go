@@ -3,22 +3,23 @@ package appstore
 import (
 	"crypto/x509"
 	"embed"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 //go:embed certs/*.cer
 var certs embed.FS
 
-const srcUrl = "https://www.apple.com/certificateauthority/"
-const outDir = "certs/"
+// srcUrl is the Apple page listing the current certificate-authority certs.
+// It is a var (not a const) so tests can point it at an unreachable host.
+var srcUrl = "https://www.apple.com/certificateauthority/"
 
 var certLinkPattern = regexp.MustCompile(`<a [^>]*href="([^"]+\.cer)"`)
 
@@ -27,115 +28,168 @@ type CertPool struct {
 	poolOnce sync.Once
 }
 
+// NewCertPool builds a trusted-root pool from the embedded Apple root cert(s) and
+// then best-effort refreshes it with Apple's currently published CA certs.
+//
+// The returned *CertPool is always safe to use: even when the refresh fails
+// (Apple unreachable, timeout, etc.) the pool still contains the embedded pinned
+// root(s). In that case a non-nil error is returned alongside the usable pool so
+// the failure is visible rather than silently swallowed - callers may log it and
+// proceed, or treat it as fatal.
 func NewCertPool() (*CertPool, error) {
 	cp := &CertPool{}
 	err := cp.Init()
-	if err != nil {
-		return nil, err
-	}
-	return cp, nil
+	return cp, err
 }
 
 func (cp *CertPool) Init() error {
 	var err error
 	cp.poolOnce.Do(func() {
 		cp.pool = x509.NewCertPool()
+		// The embedded pinned root(s) are the guaranteed baseline. If none load,
+		// the binary is broken - fail loudly rather than return an empty pool.
+		if err = cp.loadEmbedded(); err != nil {
+			return
+		}
+		// Best-effort refresh from Apple. On failure we keep the embedded-only
+		// pool and surface the error.
 		err = cp.downloadCerts()
-		err = cp.loadCerts()
 	})
 	return err
 }
 
+// loadEmbedded populates the pool from the compile-time embedded certs.
+func (cp *CertPool) loadEmbedded() error {
+	entries, err := certs.ReadDir("certs")
+	if err != nil {
+		return err
+	}
+	loaded := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !entry.Type().IsRegular() {
+			continue
+		}
+		raw, err := certs.ReadFile("certs/" + entry.Name())
+		if err != nil {
+			continue
+		}
+		if cp.pool.AppendCertsFromPEM(raw) {
+			loaded++
+			continue
+		}
+		if cert, err := x509.ParseCertificate(raw); err == nil {
+			cp.pool.AddCert(cert)
+			loaded++
+		}
+	}
+	if loaded == 0 {
+		return errors.New("appstore: no embedded certificates loaded")
+	}
+	return nil
+}
+
+// downloadCerts fetches Apple's current CA cert list and adds each cert to the
+// pool. Certs are parsed in memory - nothing is written to disk. A failure to
+// fetch the listing page is returned; a problem with a single cert link is
+// skipped so it cannot abort the whole refresh.
 func (cp *CertPool) downloadCerts() error {
-	resp, err := http.Get(srcUrl)
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	resp, err := client.Get(srcUrl)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("appstore: fetching cert list %q returned status %d", srcUrl, resp.StatusCode)
+	}
 
 	content, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
 
-	if err := os.RemoveAll(outDir); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(outDir, 0755); err != nil {
-		return err
-	}
-
-	matches := certLinkPattern.FindAllSubmatch(content, -1)
-	for _, match := range matches {
+	for _, match := range certLinkPattern.FindAllSubmatch(content, -1) {
 		certUrl, err := cp.constructCertUrl(string(match[1]))
 		if err != nil {
-			return err
+			// Unexpected host / non-https link - skip, don't abort the refresh.
+			continue
 		}
-
-		if err := cp.downloadAndSaveCert(certUrl); err != nil {
-			return err
-		}
+		// Best-effort per cert: a single bad download must not drop the others.
+		_ = cp.downloadAndAddCert(client, certUrl)
 	}
 	return nil
 }
 
 func (cp *CertPool) constructCertUrl(certPath string) (string, error) {
-	if certPath[0] == '/' {
+	var raw string
+	switch {
+	case strings.HasPrefix(certPath, "/"):
 		baseUrl, err := url.Parse(srcUrl)
 		if err != nil {
 			return "", err
 		}
 		baseUrl.Path = certPath
-		return baseUrl.String(), nil
-	} else if strings.HasPrefix(certPath, "https://www.apple.com/") || strings.HasPrefix(certPath, "https://developer.apple.com/") {
-		return certPath, nil
-	} else {
-		return url.JoinPath(srcUrl, certPath)
+		raw = baseUrl.String()
+	case strings.HasPrefix(certPath, "https://www.apple.com/"),
+		strings.HasPrefix(certPath, "https://developer.apple.com/"):
+		raw = certPath
+	default:
+		joined, err := url.JoinPath(srcUrl, certPath)
+		if err != nil {
+			return "", err
+		}
+		raw = joined
+	}
+	if err := validateAppleURL(raw); err != nil {
+		return "", err
+	}
+	return raw, nil
+}
+
+// validateAppleURL enforces https and an Apple host allowlist so a tampered
+// listing page cannot make us fetch (and trust) a cert from an arbitrary host.
+func validateAppleURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("appstore: refusing non-https cert url %q", raw)
+	}
+	switch u.Hostname() {
+	case "www.apple.com", "apple.com", "developer.apple.com":
+		return nil
+	default:
+		return fmt.Errorf("appstore: refusing cert url from unexpected host %q", u.Hostname())
 	}
 }
 
-func (cp *CertPool) downloadAndSaveCert(certUrl string) error {
-	resp, err := http.Get(certUrl)
+// downloadAndAddCert fetches a single cert and adds it to the pool, parsing the
+// bytes in memory (PEM first, DER fallback). Non-200 responses are skipped.
+func (cp *CertPool) downloadAndAddCert(client *http.Client, certUrl string) error {
+	resp, err := client.Get(certUrl)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		return nil
 	}
 
-	fileName := path.Base(certUrl)
-	filePath := filepath.Join(outDir, fileName)
-	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0644)
+	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
-	_, err = io.Copy(f, resp.Body)
-	return err
-}
-
-func (cp *CertPool) loadCerts() error {
-	entries, err := certs.ReadDir("certs")
+	if cp.pool.AppendCertsFromPEM(raw) {
+		return nil
+	}
+	cert, err := x509.ParseCertificate(raw)
 	if err != nil {
-		return err
+		return fmt.Errorf("appstore: parsing cert from %q: %w", certUrl, err)
 	}
-	for _, entry := range entries {
-		if !entry.IsDir() && entry.Type().IsRegular() {
-			cert, err := certs.ReadFile("certs/" + entry.Name())
-			if err != nil {
-				continue
-			}
-			if ok := cp.pool.AppendCertsFromPEM(cert); ok {
-				continue
-			}
-			if cer, err := x509.ParseCertificate(cert); err == nil {
-				cp.pool.AddCert(cer)
-			}
-		}
-	}
+	cp.pool.AddCert(cert)
 	return nil
 }
 
