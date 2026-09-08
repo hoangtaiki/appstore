@@ -1,6 +1,7 @@
 package appstore
 
 import (
+	"context"
 	"crypto/x509"
 	"embed"
 	"errors"
@@ -23,8 +24,27 @@ var srcUrl = "https://www.apple.com/certificateauthority/"
 
 var certLinkPattern = regexp.MustCompile(`<a [^>]*href="([^"]+\.cer)"`)
 
+// refreshTimeout bounds the entire refresh (listing fetch + all cert fetches),
+// so NewCertPool cannot block for an unbounded time regardless of link count.
+const refreshTimeout = 60 * time.Second
+
+// refreshTransport is the RoundTripper used for the cert refresh. It is nil in
+// production (so http.DefaultTransport is used) and injectable by tests.
+var refreshTransport http.RoundTripper
+
+// validateRedirect re-validates every redirect hop against the https + apple.com
+// allowlist, so an allowlisted URL cannot redirect to an untrusted host whose
+// response would then be parsed and trusted. It also caps the redirect chain.
+func validateRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("appstore: stopped after 10 redirects")
+	}
+	return validateAppleURL(req.URL.String())
+}
+
 type CertPool struct {
 	pool     *x509.CertPool
+	initErr  error
 	poolOnce sync.Once
 }
 
@@ -43,19 +63,22 @@ func NewCertPool() (*CertPool, error) {
 }
 
 func (cp *CertPool) Init() error {
-	var err error
+	// initErr is stored on the struct (not a local) so every caller - including
+	// goroutines that block on poolOnce.Do rather than running it - observes the
+	// same result. poolOnce.Do provides the happens-before for the read below.
 	cp.poolOnce.Do(func() {
 		cp.pool = x509.NewCertPool()
 		// The embedded pinned root(s) are the guaranteed baseline. If none load,
 		// the binary is broken - fail loudly rather than return an empty pool.
-		if err = cp.loadEmbedded(); err != nil {
+		if err := cp.loadEmbedded(); err != nil {
+			cp.initErr = err
 			return
 		}
 		// Best-effort refresh from Apple. On failure we keep the embedded-only
 		// pool and surface the error.
-		err = cp.downloadCerts()
+		cp.initErr = cp.downloadCerts()
 	})
-	return err
+	return cp.initErr
 }
 
 // loadEmbedded populates the pool from the compile-time embedded certs.
@@ -89,24 +112,22 @@ func (cp *CertPool) loadEmbedded() error {
 }
 
 // downloadCerts fetches Apple's current CA cert list and adds each cert to the
-// pool. Certs are parsed in memory - nothing is written to disk. A failure to
-// fetch the listing page is returned; a problem with a single cert link is
-// skipped so it cannot abort the whole refresh.
+// pool. Certs are parsed in memory - nothing is written to disk. A single overall
+// deadline bounds the whole refresh; a failure to fetch the listing page is
+// returned, and per-cert failures are collected and surfaced (a single bad link
+// cannot abort the whole refresh).
 func (cp *CertPool) downloadCerts() error {
-	client := &http.Client{Timeout: 30 * time.Second}
+	ctx, cancel := context.WithTimeout(context.Background(), refreshTimeout)
+	defer cancel()
 
-	resp, err := client.Get(srcUrl)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("appstore: fetching cert list %q returned status %d", srcUrl, resp.StatusCode)
+	client := &http.Client{
+		Transport:     refreshTransport,
+		CheckRedirect: validateRedirect,
 	}
 
-	content, err := io.ReadAll(resp.Body)
+	content, err := httpGetCtx(ctx, client, srcUrl)
 	if err != nil {
-		return err
+		return fmt.Errorf("appstore: fetching cert list %q: %w", srcUrl, err)
 	}
 
 	matches := certLinkPattern.FindAllSubmatch(content, -1)
@@ -118,6 +139,7 @@ func (cp *CertPool) downloadCerts() error {
 
 	// Best-effort per cert: a single bad cert must not drop the others, but the
 	// failures are collected and surfaced so a partial refresh is not silent.
+	seen := make(map[string]bool)
 	var errs []string
 	for _, match := range matches {
 		certUrl, err := cp.constructCertUrl(string(match[1]))
@@ -125,7 +147,11 @@ func (cp *CertPool) downloadCerts() error {
 			errs = append(errs, err.Error())
 			continue
 		}
-		if err := cp.downloadAndAddCert(client, certUrl); err != nil {
+		if seen[certUrl] {
+			continue
+		}
+		seen[certUrl] = true
+		if err := cp.downloadAndAddCert(ctx, client, certUrl); err != nil {
 			errs = append(errs, err.Error())
 		}
 	}
@@ -133,6 +159,24 @@ func (cp *CertPool) downloadCerts() error {
 		return fmt.Errorf("appstore: %d cert refresh error(s): %s", len(errs), strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// httpGetCtx performs a context-bound GET and returns the response body. A
+// non-200 response is an error.
+func httpGetCtx(ctx context.Context, client *http.Client, rawURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("returned status %d", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
 }
 
 func (cp *CertPool) constructCertUrl(certPath string) (string, error) {
@@ -182,19 +226,10 @@ func validateAppleURL(raw string) error {
 // downloadAndAddCert fetches a single cert and adds it to the pool, parsing the
 // bytes in memory (PEM first, DER fallback). Any failure (non-200, read, parse)
 // is returned so the caller can surface it.
-func (cp *CertPool) downloadAndAddCert(client *http.Client, certUrl string) error {
-	resp, err := client.Get(certUrl)
+func (cp *CertPool) downloadAndAddCert(ctx context.Context, client *http.Client, certUrl string) error {
+	raw, err := httpGetCtx(ctx, client, certUrl)
 	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("appstore: fetching cert %q returned status %d", certUrl, resp.StatusCode)
-	}
-
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
+		return fmt.Errorf("appstore: fetching cert %q: %w", certUrl, err)
 	}
 
 	if cp.pool.AppendCertsFromPEM(raw) {
