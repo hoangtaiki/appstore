@@ -1,10 +1,28 @@
 package appstore
 
 import (
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// rootTrusted reports whether the embedded pinned Apple root (defaultRootPEM) is
+// trusted by pool. Used instead of the deprecated x509.CertPool.Subjects().
+func rootTrusted(pool *x509.CertPool) error {
+	block, _ := pem.Decode([]byte(defaultRootPEM))
+	if block == nil {
+		return errors.New("failed to decode defaultRootPEM")
+	}
+	root, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return err
+	}
+	_, err = root.Verify(x509.VerifyOptions{Roots: pool})
+	return err
+}
 
 // TestNewCertPool exercises the live download from apple.com. It is gated behind
 // APPSTORE_NET=1 so the default `go test` run stays offline and deterministic.
@@ -19,13 +37,16 @@ func TestNewCertPool(t *testing.T) {
 	if cp == nil || cp.GetCertPool() == nil {
 		t.Fatal("expected a usable cert pool")
 	}
-	if n := len(cp.GetCertPool().Subjects()); n < 1 {
-		t.Fatalf("expected at least 1 cert in pool, got %d", n)
+	if err := rootTrusted(cp.GetCertPool()); err != nil {
+		t.Fatalf("expected the embedded pinned root to be trusted: %v", err)
 	}
 }
 
 // TestNewCertPool_DoesNotTouchCWDCerts locks in the H3 fix: NewCertPool() must
 // never delete or modify a `certs/` directory in the process working directory.
+//
+// Not parallel-safe: it mutates the package var srcUrl and the process working
+// directory. Do not add t.Parallel().
 func TestNewCertPool_DoesNotTouchCWDCerts(t *testing.T) {
 	// Point the source at a fail-fast address so no real network call happens.
 	restore := srcUrl
@@ -40,7 +61,11 @@ func TestNewCertPool_DoesNotTouchCWDCerts(t *testing.T) {
 	if err := os.Chdir(tmp); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chdir(wd)
+	defer func() {
+		if err := os.Chdir(wd); err != nil {
+			t.Errorf("failed to restore working directory: %v", err)
+		}
+	}()
 
 	// Simulate a server that keeps its own TLS material under ./certs.
 	if err := os.MkdirAll("certs", 0o755); err != nil {
@@ -67,6 +92,8 @@ func TestNewCertPool_DoesNotTouchCWDCerts(t *testing.T) {
 
 // TestNewCertPool_NeverEmptyOnDownloadFailure proves the embedded pinned root
 // remains available (and the failure is surfaced) when the refresh fails.
+//
+// Not parallel-safe: it mutates the package var srcUrl. Do not add t.Parallel().
 func TestNewCertPool_NeverEmptyOnDownloadFailure(t *testing.T) {
 	restore := srcUrl
 	srcUrl = "http://127.0.0.1:0/"
@@ -79,7 +106,7 @@ func TestNewCertPool_NeverEmptyOnDownloadFailure(t *testing.T) {
 	if cp == nil || cp.GetCertPool() == nil {
 		t.Fatal("expected a usable pool despite the download failure")
 	}
-	if n := len(cp.GetCertPool().Subjects()); n == 0 {
-		t.Fatal("expected the embedded pinned root(s) to remain in the pool")
+	if err := rootTrusted(cp.GetCertPool()); err != nil {
+		t.Fatalf("expected the embedded pinned root to remain trusted: %v", err)
 	}
 }

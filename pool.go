@@ -109,14 +109,28 @@ func (cp *CertPool) downloadCerts() error {
 		return err
 	}
 
-	for _, match := range certLinkPattern.FindAllSubmatch(content, -1) {
+	matches := certLinkPattern.FindAllSubmatch(content, -1)
+	if len(matches) == 0 {
+		// A 200 with no matches usually means Apple changed the page layout;
+		// surface it rather than silently refreshing nothing.
+		return fmt.Errorf("appstore: cert list %q returned no .cer links", srcUrl)
+	}
+
+	// Best-effort per cert: a single bad cert must not drop the others, but the
+	// failures are collected and surfaced so a partial refresh is not silent.
+	var errs []string
+	for _, match := range matches {
 		certUrl, err := cp.constructCertUrl(string(match[1]))
 		if err != nil {
-			// Unexpected host / non-https link - skip, don't abort the refresh.
+			errs = append(errs, err.Error())
 			continue
 		}
-		// Best-effort per cert: a single bad download must not drop the others.
-		_ = cp.downloadAndAddCert(client, certUrl)
+		if err := cp.downloadAndAddCert(client, certUrl); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("appstore: %d cert refresh error(s): %s", len(errs), strings.Join(errs, "; "))
 	}
 	return nil
 }
@@ -157,7 +171,7 @@ func validateAppleURL(raw string) error {
 	if u.Scheme != "https" {
 		return fmt.Errorf("appstore: refusing non-https cert url %q", raw)
 	}
-	switch u.Hostname() {
+	switch strings.ToLower(u.Hostname()) {
 	case "www.apple.com", "apple.com", "developer.apple.com":
 		return nil
 	default:
@@ -166,7 +180,8 @@ func validateAppleURL(raw string) error {
 }
 
 // downloadAndAddCert fetches a single cert and adds it to the pool, parsing the
-// bytes in memory (PEM first, DER fallback). Non-200 responses are skipped.
+// bytes in memory (PEM first, DER fallback). Any failure (non-200, read, parse)
+// is returned so the caller can surface it.
 func (cp *CertPool) downloadAndAddCert(client *http.Client, certUrl string) error {
 	resp, err := client.Get(certUrl)
 	if err != nil {
@@ -174,7 +189,7 @@ func (cp *CertPool) downloadAndAddCert(client *http.Client, certUrl string) erro
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil
+		return fmt.Errorf("appstore: fetching cert %q returned status %d", certUrl, resp.StatusCode)
 	}
 
 	raw, err := io.ReadAll(resp.Body)
